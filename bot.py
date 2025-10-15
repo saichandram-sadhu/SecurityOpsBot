@@ -7,9 +7,22 @@ import feedparser
 import google.generativeai as genai
 import os
 import random
+import logging
+import re
 from datetime import datetime, timedelta
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("securityopsbot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -23,28 +36,32 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 NEWS_CHANNEL_ID = os.getenv('NEWS_CHANNEL_ID')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-AUTO_NEWS_HOUR = 9  # 9 AM daily
+AUTO_NEWS_HOUR = int(os.getenv('AUTO_NEWS_HOUR', 9))  # 9 AM daily by default
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+# Set logging level
+logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 
 if not DISCORD_BOT_TOKEN:
-    print("❌ ERROR: DISCORD_BOT_TOKEN not found in .env file")
+    logger.error("❌ ERROR: DISCORD_BOT_TOKEN not found in .env file")
     exit(1)
 
 if not GEMINI_API_KEY:
-    print("⚠️ WARNING: GEMINI_API_KEY not found. AI features will be disabled.")
+    logger.warning("⚠️ WARNING: GEMINI_API_KEY not found. AI features will be disabled.")
 
 # Configure Gemini AI
 if GEMINI_API_KEY:
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('models/gemini-2.0-flash')
-        print("✅ Gemini AI 2.0 Flash configured successfully!")
+        genai.configure(api_key=GEMINI_API_KEY)  # type: ignore
+        gemini_model = genai.GenerativeModel('gemini-pro')  # type: ignore
+        logger.info("✅ Gemini AI configured successfully!")
     except Exception as e:
-        print(f"❌ Gemini AI configuration failed: {e}")
+        logger.error(f"❌ Gemini AI configuration failed: {e}")
         gemini_model = None
 else:
     gemini_model = None
 
-print("🛡️ SecurityOpsBot with Gemini AI Starting...")
+logger.info("🛡️ SecurityOpsBot with Gemini AI Starting...")
 
 # ===== CYBERSECURITY NEWS FEEDS =====
 class SecurityNews:
@@ -83,9 +100,11 @@ class SecurityNews:
                     summary = entry.get('summary', '')
                     if summary:
                         # Remove HTML tags and limit length
-                        import re
-                        summary = re.sub('<[^<]+?>', '', summary)
-                        summary = summary[:250] + '...' if len(summary) > 250 else summary
+                        if isinstance(summary, str):
+                            summary = re.sub('<[^<]+?>', '', summary)
+                            summary = summary[:250] + '...' if len(summary) > 250 else summary
+                        else:
+                            summary = str(summary)[:250] + '...' if len(str(summary)) > 250 else str(summary)
                     
                     all_news.append({
                         'source': source,
@@ -96,7 +115,7 @@ class SecurityNews:
                     })
             except Exception as e:
                 print(f"Error fetching {source}: {e}")
-        
+
         # Sort by date (newest first) and return limited results
         return sorted(all_news, key=lambda x: x['published'], reverse=True)[:limit]
 
@@ -118,7 +137,7 @@ class SecurityNews:
                             })
                         return cves
         except Exception as e:
-            print(f"Error fetching CVEs: {e}")
+            logger.error(f"Error fetching CVEs: {e}")
         
         return []
 
@@ -154,7 +173,7 @@ class SecurityNews:
             return response.text
             
         except Exception as e:
-            print(f"Error generating AI summary: {e}")
+            logger.error(f"Error generating AI summary: {e}")
             return None
 
     def get_random_banner(self):
@@ -169,18 +188,23 @@ news_fetcher = SecurityNews()
 async def daily_security_digest():
     """Post enhanced daily security digest with AI analysis"""
     if not NEWS_CHANNEL_ID:
-        print("❌ NEWS_CHANNEL_ID not set in .env file")
+        logger.error("❌ NEWS_CHANNEL_ID not set in .env file")
         return
     
     try:
         channel_id = int(NEWS_CHANNEL_ID)
         channel = bot.get_channel(channel_id)
         
-        if channel is None:
-            print(f"❌ Channel with ID {NEWS_CHANNEL_ID} not found")
+        # Check if channel is a text channel that can send messages
+        if channel is None or not hasattr(channel, 'send'):
+            print(f"❌ Channel with ID {NEWS_CHANNEL_ID} not found or invalid")
             return
-        
-        print(f"📰 Preparing ENHANCED daily security digest for {datetime.now().strftime('%Y-%m-%d')}")
+                
+            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                print(f"❌ Channel with ID {NEWS_CHANNEL_ID} is not a text channel")
+                return
+
+        logger.info(f"📰 Preparing ENHANCED daily security digest for {datetime.now().strftime('%Y-%m-%d')}")
         
         # Fetch data
         latest_news = await news_fetcher.fetch_latest_news(limit=8)
@@ -211,7 +235,9 @@ async def daily_security_digest():
                 inline=False
             )
         
-        await channel.send(embed=header_embed)
+        # Send embed only if channel is valid
+        if hasattr(channel, 'send') and isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await channel.send(embed=header_embed)
         
         # ===== CRITICAL ALERTS SECTION =====
         if recent_cves:
@@ -233,7 +259,9 @@ async def daily_security_digest():
                         inline=False
                     )
                 
-                await channel.send(embed=alerts_embed)
+                # Send embed only if channel is valid
+                if hasattr(channel, 'send') and isinstance(channel, (discord.TextChannel, discord.Thread)):
+                    await channel.send(embed=alerts_embed)
         
         # ===== TOP NEWS EMBED =====
         if latest_news:
@@ -252,7 +280,10 @@ async def daily_security_digest():
                 )
             
             news_embed.set_footer(text=f"Sources: {', '.join(set([news['source'] for news in latest_news[:5]]))}")
-            await channel.send(embed=news_embed)
+            
+            # Send embed only if channel is valid
+            if hasattr(channel, 'send') and isinstance(channel, (discord.TextChannel, discord.Thread)):
+                await channel.send(embed=news_embed)
         
         # ===== SECURITY RECOMMENDATIONS =====
         recommendations = [
@@ -274,7 +305,9 @@ async def daily_security_digest():
         for rec in selected_recs:
             rec_embed.add_field(name=rec, value="\u200b", inline=False)
         
-        await channel.send(embed=rec_embed)
+        # Send embed only if channel is valid
+        if hasattr(channel, 'send') and isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await channel.send(embed=rec_embed)
         
         # ===== DAILY THREAT STATS =====
         stats_embed = discord.Embed(
@@ -290,16 +323,19 @@ async def daily_security_digest():
         stats_embed.add_field(name="📊 Threat Level", value="Elevated" if recent_cves else "Normal", inline=True)
         stats_embed.add_field(name="🔄 Next Update", value="Tomorrow 9:00 AM", inline=True)
         
-        await channel.send(embed=stats_embed)
+        # Send embed only if channel is valid
+        if hasattr(channel, 'send') and isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await channel.send(embed=stats_embed)
         
         print(f"✅ Enhanced daily security digest posted to channel {NEWS_CHANNEL_ID}")
-        
+
     except Exception as e:
         print(f"❌ Error in enhanced daily digest: {e}")
         # Try to send error message
         try:
             channel = bot.get_channel(int(NEWS_CHANNEL_ID))
-            if channel:
+            # Check if channel is valid for sending messages
+            if channel and hasattr(channel, 'send') and isinstance(channel, (discord.TextChannel, discord.Thread)):
                 await channel.send("❌ Error generating daily security digest. Manual commands still available.")
         except:
             pass
@@ -316,7 +352,7 @@ async def before_daily_digest():
         target_time += timedelta(days=1)
     
     wait_seconds = (target_time - now).total_seconds()
-    print(f"⏰ Next enhanced daily digest in {wait_seconds/3600:.1f} hours")
+    logger.info(f"⏰ Next enhanced daily digest in {wait_seconds/3600:.1f} hours")
     await asyncio.sleep(wait_seconds)
 
 # ===== GEMINI AI COMMANDS =====
@@ -541,9 +577,6 @@ async def recentcves(ctx, count: int = 5):
     except Exception as e:
         await ctx.send("❌ Error fetching CVEs. Please try again later.")
 
-# Keep all your existing commands (cve, pwned, tools, threatlevel, etc.) 
-# They will work exactly as before but with the enhanced news system
-
 @bot.command()
 async def cve(ctx, cve_id):
     """Look up CVE details - Usage: !cve CVE-2021-44228"""
@@ -563,6 +596,117 @@ async def tools(ctx):
 async def threatlevel(ctx):
     """Get current global threat level - Usage: !threatlevel"""
     # ... (keep your existing threatlevel function code)
+
+@bot.command()
+async def threatintel(ctx, *, query=None):
+    """Get threat intelligence information - Usage: !threatintel <ip|domain|hash>"""
+    if not query:
+        await ctx.send("❌ Please provide an IP, domain, or hash to lookup.\nExample: `!threatintel 8.8.8.8`")
+        return
+    
+    await ctx.send(f"🔍 Looking up threat intelligence for: **{query}**")
+    
+    # VirusTotal-like lookup simulation (in a real implementation, you would integrate with actual APIs)
+    try:
+        # In a production version, you would integrate with threat intelligence platforms like:
+        # - VirusTotal API
+        # - AlienVault OTX
+        # - IBM X-Force Exchange
+        # - Hybrid-Analysis
+        
+        # For now, we'll simulate with some example responses
+        import hashlib
+        import re
+        
+        # Determine query type
+        ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+        domain_pattern = r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        hash_pattern = r'^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$'
+        
+        response_type = ""
+        if re.match(ip_pattern, query):
+            response_type = "IP address"
+        elif re.match(domain_pattern, query):
+            response_type = "domain"
+        elif re.match(hash_pattern, query):
+            response_type = "file hash"
+        else:
+            response_type = "indicator"
+            
+        # Generate simulated threat intel
+        threat_level = random.choice(["🟢 Low", "🟡 Medium", "🟠 High", "🔴 Critical"])
+        last_seen = random.randint(1, 365)
+        sources = random.randint(1, 15)
+        
+        embed = discord.Embed(
+            title=f"🔍 Threat Intelligence Report",
+            color=0xe74c3c if "Critical" in threat_level else 0xf39c12 if "High" in threat_level else 0x3498db,
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(name="Indicator", value=query, inline=True)
+        embed.add_field(name="Type", value=response_type, inline=True)
+        embed.add_field(name="Threat Level", value=threat_level, inline=True)
+        embed.add_field(name="Last Seen", value=f"{last_seen} days ago", inline=True)
+        embed.add_field(name="Source Reports", value=sources, inline=True)
+        embed.add_field(name="Status", value="Active threat" if "High" in threat_level or "Critical" in threat_level else "No active threats", inline=True)
+        
+        # Add recommendations based on threat level
+        if "Critical" in threat_level:
+            recommendation = "🔴 BLOCK IMMEDIATELY - Critical threat detected. Block at firewall and investigate all related activity."
+        elif "High" in threat_level:
+            recommendation = "🟠 BLOCK AND INVESTIGATE - High risk indicator. Block and review recent logs for related activity."
+        else:
+            recommendation = "🟢 MONITOR - Low to medium risk. Continue monitoring for suspicious activity."
+            
+        embed.add_field(name="Recommendation", value=recommendation, inline=False)
+        
+        embed.set_footer(text="Simulated Threat Intelligence | In production, integrate with VT, OTX, X-Force, etc.")
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error in threatintel command: {e}")
+        await ctx.send(f"❌ Error retrieving threat intelligence: {str(e)}")
+
+@bot.command()
+async def incidentreport(ctx, *, details=None):
+    """Create a security incident report template - Usage: !incidentreport [optional details]"""
+    await ctx.send("📝 Creating security incident report...")
+    
+    # Create incident report embed
+    embed = discord.Embed(
+        title="🛡️ SECURITY INCIDENT REPORT",
+        description="Use this template to document and report security incidents",
+        color=0xe74c3c,
+        timestamp=datetime.now()
+    )
+    
+    # Add standard incident report fields
+    embed.add_field(name="📅 Date/Time", value=f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", inline=True)
+    embed.add_field(name="📍 Reported By", value=ctx.author.mention, inline=True)
+    embed.add_field(name="📊 Severity Level", value="🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low", inline=True)
+    
+    # Incident details section
+    embed.add_field(name="📋 Incident Summary", value=details if details else "Provide a brief summary of the incident", inline=False)
+    
+    # Technical details
+    embed.add_field(name="🖥️ Affected Systems", value="List affected systems, IPs, or services", inline=False)
+    embed.add_field(name="🔍 Indicators of Compromise", value="List any IOCs (IPs, hashes, domains, etc.)", inline=False)
+    
+    # Timeline section
+    embed.add_field(name="🕒 Timeline", value="```\nYYYY-MM-DD HH:MM - Incident detected\nYYYY-MM-DD HH:MM - Containment actions taken\nYYYY-MM-DD HH:MM - Incident resolved\n```", inline=False)
+    
+    # Actions taken
+    embed.add_field(name="🔨 Immediate Actions", value="List immediate containment/response actions taken", inline=False)
+    
+    # Recommendations
+    embed.add_field(name="💡 Recommendations", value="List recommended long-term fixes and preventive measures", inline=False)
+    
+    # Footer with instructions
+    embed.set_footer(text="Fill in the details and share with your security team")
+    
+    await ctx.send(embed=embed)
+    await ctx.send("📋 **Tip**: Copy this template and fill in the details for your incident report!")
 
 @bot.command()
 async def testnews(ctx):
@@ -640,6 +784,8 @@ async def help(ctx):
         {"name": "!aithreat <topic>", "value": "AI threat analysis", "example": "`!aithreat ransomware`"},
         {"name": "!dailybrief", "value": "Manual daily briefing", "example": "`!dailybrief`"},
         {"name": "!threatlevel", "value": "Current threat assessment", "example": "`!threatlevel`"},
+        {"name": "!threatintel <indicator>", "value": "Threat intelligence lookup", "example": "`!threatintel 8.8.8.8`"},
+        {"name": "!incidentreport [details]", "value": "Create incident report template", "example": "`!incidentreport Suspicious login attempts`"},
         {"name": "!testnews", "value": "Test enhanced system", "example": "`!testnews`"},
         {"name": "!tools", "value": "List security tools", "example": "`!tools`"},
         {"name": "!botinfo", "value": "Bot information", "example": "`!botinfo`"},
@@ -670,9 +816,9 @@ async def help(ctx):
 # ===== BOT STARTUP =====
 @bot.event
 async def on_ready():
-    print(f'✅ {bot.user} has connected to Discord!')
-    print(f'✅ Bot is in {len(bot.guilds)} servers')
-    print(f'✅ Gemini AI: {"Enabled" if gemini_model else "Disabled"}')
+    logger.info(f'✅ {bot.user} has connected to Discord!')
+    logger.info(f'✅ Bot is in {len(bot.guilds)} servers')
+    logger.info(f'✅ Gemini AI: {"Enabled" if gemini_model else "Disabled"}')
     
     # Set bot status
     activity = discord.Activity(
@@ -684,9 +830,9 @@ async def on_ready():
     # Start daily news task if channel is set
     if NEWS_CHANNEL_ID and not daily_security_digest.is_running():
         daily_security_digest.start()
-        print('✅ Enhanced daily security digest task started!')
+        logger.info('✅ Enhanced daily security digest task started!')
     else:
-        print('ℹ️ Daily news not configured. Set NEWS_CHANNEL_ID in .env to enable.')
+        logger.info('ℹ️ Daily news not configured. Set NEWS_CHANNEL_ID in .env to enable.')
 
 # ===== ERROR HANDLING =====
 @bot.event
@@ -697,11 +843,11 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ Missing required argument. Check `!help` for command usage.")
     else:
         await ctx.send("❌ An error occurred. Please try again.")
-        print(f"Command error: {error}")
+        logger.error(f"Command error: {error}")
 
 # ===== START THE BOT =====
 if __name__ == "__main__":
-    print("🛡️ Enhanced SecurityOpsBot with Gemini AI Starting...")
-    print("📁 Running from:", os.path.dirname(os.path.abspath(__file__)))
-    print("🎯 Configured for #📢│announcements channel")
+    logger.info("🛡️ Enhanced SecurityOpsBot with Gemini AI Starting...")
+    logger.info("📁 Running from:", os.path.dirname(os.path.abspath(__file__)))
+    logger.info("🎯 Configured for #📢│announcements channel")
     bot.run(DISCORD_BOT_TOKEN)

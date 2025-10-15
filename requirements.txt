@@ -1,0 +1,7 @@
+discord.py==2.3.0
+feedparser==6.0.10
+aiohttp==3.8.5
+requests==2.31.0
+python-dotenv==1.0.0
+google-generativeai==0.3.0
+pillow==10.0.0  # For image handling (optional)

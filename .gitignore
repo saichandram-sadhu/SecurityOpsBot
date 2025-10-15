@@ -10,3 +10,4 @@ venv/
 *.log
 secrets/
 config/
+*.env.local
